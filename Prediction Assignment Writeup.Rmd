@@ -1,0 +1,153 @@
+---
+title: "How well they do it? - Prediction Assignment"
+author: "J"
+date: "`r Sys.Date()`"
+output: html_document
+---
+
+```{r setup, include=FALSE, warning=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+library(caret)
+library(lubridate)
+```
+
+## Introduction
+Collecting a large amount of data with wearable fitness trackers in now easy to do. In this experiment, we will try to discriminate between well (and not so well) perform barbell lift. We will use the data provided in the following study.
+
+"Six young health participants were asked to perform one set of 10 repetitions of the Unilateral Dumbbell Biceps Curl in five different fashions: exactly according to the specification (Class A), throwing the elbows to the front (Class B), lifting the dumbbell only halfway (Class C), lowering the dumbbell only halfway (Class D) and throwing the hips to the front (Class E). Class A corresponds to the specified execution of the exercise, while the other 4 classes correspond to common mistakes." Extract from <http://groupware.les.inf.puc-rio.br/har>
+
+So, our goal is to predict in which "classe" variable each exercise was performed.
+The steps are easy: we will collect and clean the data, build models for predictions with the use of cross validation. With the results obtained, we will predict 20 new test cases.
+
+## Collect and clean data
+
+```{r get_data, warning=FALSE}
+# *** get data from file ***
+df_train <- read.csv("pml-training.csv")
+df_test <- read.csv("pml-testing.csv")
+df_test <- df_test[, 1:ncol(df_test)-1] # remove the last column of the test set because different name 'problem id'
+df_test$classe <- NA # add a new column to the test set and fill it with NA
+
+# by combining the train and test set we will be able to perform the pre-processing on all the samples
+df_total <- rbind(df_train, df_test) # join train and test
+df_total[df_total == "#DIV/0!"] <- NA # replace chr with NA
+df_total <- df_total[, -1] # see note below why this column was removed
+dim(df_total)
+```
+
+Note: At the beginning I went too quickly and forgot to remove the first column 'x' from the dataset. This column, the index of the observation in the train set, had a major impact on the models because of the way the dataset was constructed. Since the classes were all in order, there was a direct link between the index column and the classes. So, the predictions gave me all "A" because of the low index numbers for the test set. This is why this column was removed.
+
+```{r clean_data, warning=FALSE}
+# *** Get information on near zero variance for each variable in the dataset ***
+near0_view <- nearZeroVar(df_total, saveMetrics=TRUE) # detect near zero variables
+nb_NA <- apply(df_total, 2, function(x) sum(is.na(x))) # number of NA per column
+NA_pct <- round(nb_NA/dim(df_total)[1], 3) # percentage of NA per column
+full_picture <- data.frame(cbind(near0_view, nb_NA, NA_pct)) # compile a near zero variance dataframe with info on NAs
+full_picture
+
+# with the info collected, remove variables with near zero variance and NA percentage greater than 97%
+col_names <- rownames(full_picture[(full_picture$nzv==TRUE | full_picture$NA_pct > 0.97),])
+col_numbers <- match(col_names,names(df_total))
+df_total <- df_total[, -col_numbers] # remove columns from df
+dim(df_total)
+# So we went down from 159 variables to 58
+
+# Convert two variables to factors
+df_total$classe <- as.factor(df_total$classe)
+df_total$user_name <- as.factor(df_total$user_name)
+
+# Convert chr to time with lubridate
+df_total$cvtd_timestamp <- ymd_hms(df_total$cvtd_timestamp,tz=Sys.timezone())
+
+```
+
+
+```{r partitions, warning=FALSE}
+# create partition of the dataset
+df_cv <- df_total[!is.na(df_total$classe),] # extract the train and test portions of the dataset
+df_validation <- df_total[is.na(df_total$classe),] # extract the validation portion of the dataset
+df_validation_x <- df_validation[,-59] # remove the last column of the validation (containing the classe)
+
+# separate train/test sets for the cross validation
+set.seed(100) # for reproductibility
+category_column <- "classe"
+train_idx <- createDataPartition(df_cv[[category_column]], p = 0.8, list = FALSE) # 80% train / 20% test
+df_cv_train <- df_cv[train_idx, ] # train set
+df_cv_train_y <- df_cv_train$classe # classes of the train set
+df_cv_test <- df_cv[-train_idx, ] # test set
+df_cv_test_y <- df_cv_test$classe # classes of the test set
+
+ctrl <- trainControl(method = "repeatedcv", number = 5, verboseIter = FALSE) # cross validation to limit overfitting
+```
+## Model Building
+
+We will use 3 different techniques to construct models for the dataset, before combining them.
+
+### LDA
+
+During the course we saw linear discriminant analysis (LDA) to discriminate between categories. Let's try it.
+
+```{r model_LDA, warning=FALSE}
+# MODEL LDA
+model_lda <- train(classe ~ ., data = df_cv_train, method = "lda", trControl = ctrl) # train LDA model with cross validation on train set
+predict_lda <- predict(model_lda, newdata = df_cv_test) # predict test set with model
+confusionMatrix_lda <- confusionMatrix(predict_lda, df_cv_test_y) # analyse results with confusion matrix
+confusionMatrix_lda
+```
+
+The results from the confusion matrix shows an accuracy of 74.4% on the test set, and we can see on the confusion matrix that numerous movements were incorrectly assigned.
+
+### Random Forests (RF)
+We also saw that random forest works well for classification problems.
+
+```{r model_RF, warning=FALSE}
+# MODEL RANDOM FORESTS
+model_rf <- train(classe ~ ., data = df_cv_train, method = "rf", trControl = ctrl) # train RF model with cross validation on train set
+predict_rf <- predict(model_rf, newdata = df_cv_test) # predict test set with model
+confusionMatrix_rf <- confusionMatrix(predict_rf, df_cv_test_y) # analyse results with confusion matrix
+confusionMatrix_rf
+```
+
+The results from the confusion matrix for the random forests are excellent with an accuracy of 99.9% on almost 4000 samples from the test set.
+
+### Gradien Boosting Model (GBM)
+The last model use will be a gbm model for classification.
+```{r model_GBM, warning=FALSE}
+# MODEL GRADIENT BOOSTING
+model_gbm <- train(classe ~ ., data = df_cv_train, method = "gbm", trControl = ctrl) # train GBM model with cross validation on train set
+predict_gbm <- predict(model_gbm, newdata = df_cv_test) # predict test set with model
+confusionMatrix_gbm <- confusionMatrix(predict_gbm, df_cv_test_y) # analyse results with confusion matrix
+confusionMatrix_gbm
+```
+
+This time, the results from the confusion matrix show an accuracy of 99.6% on almost 4000 samples from the test set.
+
+# Ensembling
+Now that we have prepare our 3 models, we will combine their predictions and apply a random forest model to provide the final model for classe prediction.
+```{r ensemble, warning=FALSE}
+# ENSEMBLING
+df_predictions <- data.frame(predict_lda, predict_rf, predict_gbm, label = df_cv_test_y) # create dataframe with predictions from the 3 models and the expected classes
+model_ens <- train(label ~ ., data = df_predictions, method = "rf") # train a rf model on the dataframe
+predict_ens <- predict(model_ens, newdata = df_predictions) # predict using the ensemble model on the predictions dataframe
+confusionMatrix_ens <- confusionMatrix(predict_ens, df_cv_test_y) # analyse results with confusion matrix
+confusionMatrix_ens
+```
+
+# Validation
+
+Now that we have the ensemble model, predict the classes of the validation dataset.
+```{r validation, warning=FALSE}
+# VALIDATION
+val_predict_lda <- predict(model_lda, df_validation_x) # predict using LDA model on validation set
+val_predict_rf <- predict(model_rf, df_validation_x) # predict using RF model on validation set
+val_predict_gbm <- predict(model_gbm, df_validation_x) # predict using GBM model on validation set
+
+val_df_predict <- data.frame(predict_lda=val_predict_lda, predict_rf=val_predict_rf, predict_gbm=val_predict_gbm) # create df with predictions on validation dataset
+predicted_validation <- predict(model_ens, val_df_predict) # predict using ensemble model on validation df
+predicted_validation
+```
+
+# Conclusions
+
+Three different types of models (LDA, RF and GMB) were tested on the given dataset, and for the RF and GBM models an accuracy of almost 100% was obtained with cross validation. So, it makes sense that the ensemble model (RF) would provide the same level of accuracy for the classification with five levels(A through E). I am surprise with the high accuracy of the results obtained, and when it comes to answer the question: "what you think the expected out of sample error is", I would expect it to be high, but lower than the 99.9% obtained on the test set.
+
